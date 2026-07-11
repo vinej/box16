@@ -109,6 +109,9 @@ struct options {
 
 	int window_width  = 0;
 	int window_height = 0;
+
+	bool        enable_binary_monitor  = false;
+	std::string binary_monitor_address = "ip4://127.0.0.1:6502";
 };
 
 extern options Options;

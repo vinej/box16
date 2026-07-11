@@ -62,6 +62,14 @@ static void usage()
 	fmt::print("\tInject a BASIC program in ASCII encoding through the\n");
 	fmt::print("\tkeyboard.\n");
 
+	fmt::print("-binarymonitor\n");
+	fmt::print("\tAccept VICE binary monitor protocol connections, so debugger\n");
+	fmt::print("\tfront-ends written for VICE (e.g. VS64) can attach.\n");
+	fmt::print("\tListens on ip4://127.0.0.1:6502 unless overridden.\n");
+
+	fmt::print("-binarymonitoraddress ip4://<host>:<port>\n");
+	fmt::print("\tThe address the binary monitor listens on. Implies -binarymonitor.\n");
+
 	fmt::print("-debug <address>\n");
 	fmt::print("\tSet a breakpoint in the debugger\n");
 
@@ -391,6 +399,23 @@ static void parse_cmdline(mINI::INIMap<std::string> &ini, int argc, char **argv)
 			}
 
 			ini["bas"] = argv[0];
+			argc--;
+			argv++;
+
+		} else if (!strcmp(argv[0], "-binarymonitor")) {
+			argc--;
+			argv++;
+			ini["binarymonitor"] = "true";
+
+		} else if (!strcmp(argv[0], "-binarymonitoraddress")) {
+			argc--;
+			argv++;
+			if (!argc || argv[0][0] == '-') {
+				usage();
+			}
+
+			ini["binarymonitoraddress"] = argv[0];
+			ini["binarymonitor"]        = "true";
 			argc--;
 			argv++;
 
@@ -877,6 +902,14 @@ static char const *set_options(options &opts, mINI::INIMap<std::string> &ini)
 			return "ram";
 		}
 		opts.num_ram_banks = kb / 8;
+	}
+
+	if (ini.has("binarymonitor") && ini["binarymonitor"] == "true") {
+		opts.enable_binary_monitor = true;
+	}
+
+	if (ini.has("binarymonitoraddress")) {
+		opts.binary_monitor_address = ini["binarymonitoraddress"];
 	}
 
 	if (ini.has("hypercall_path")) {

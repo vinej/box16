@@ -17,6 +17,7 @@
 #endif
 #include "SDL.h"
 #include "audio.h"
+#include "binary_monitor.h"
 #include "boxmon/boxmon.h"
 #include "cpu/fake6502.h"
 #include "cpu/mnemonics.h"
@@ -349,6 +350,10 @@ int main(int argc, char **argv)
 
 	machine_reset();
 
+	if (Options.enable_binary_monitor) {
+		binary_monitor_init(Options.binary_monitor_address);
+	}
+
 	timing_init();
 
 #ifdef __EMSCRIPTEN__
@@ -379,6 +384,7 @@ void main_shutdown()
 		memory_dump_usage_counts();
 	}
 
+	binary_monitor_shutdown();
 	boxmon_system_shutdown();
 	sdcard_shutdown();
 	audio_close();
@@ -393,6 +399,10 @@ void emulator_loop()
 {
 	for (;;) {
 		if (debugger_is_paused()) {
+			binary_monitor_process(true);
+			if (!debugger_is_paused()) {
+				continue; // the monitor resumed or stepped; run the CPU
+			}
 			vera_video_force_redraw_screen();
 			display_process();
 			if (!sdl_events_update()) {
@@ -482,6 +492,7 @@ void emulator_loop()
 				break;
 			}
 
+			binary_monitor_process(false);
 			timing_update();
 #ifdef __EMSCRIPTEN__
 			// After completing a frame we yield back control to the browser to stay responsive

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -364,6 +364,7 @@ xcopy $(VendorDir)\zlib-1.2.13\lib\x64\*.dll "$(OutDir)" /E /I /F /Y
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\src\audio.cpp" />
+    <ClCompile Include="..\..\src\binary_monitor.cpp" />
     <ClCompile Include="..\..\src\bitutils.cpp" />
     <ClCompile Include="..\..\src\boxmon\boxmon.cpp" />
     <ClCompile Include="..\..\src\boxmon\command.cpp" />
@@ -427,6 +428,7 @@ xcopy $(VendorDir)\zlib-1.2.13\lib\x64\*.dll "$(OutDir)" /E /I /F /Y
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\src\audio.h" />
+    <ClInclude Include="..\..\src\binary_monitor.h" />
     <ClInclude Include="..\..\src\bitutils.h" />
     <ClInclude Include="..\..\src\boxmon\boxmon.h" />
     <ClInclude Include="..\..\src\boxmon\command.h" />
