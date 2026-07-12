@@ -1016,7 +1016,15 @@ static int copen(int channel)
 					channels[channel].read  = true;
 					channels[channel].write = true;
 					break;
+				default:
+					// ",S,R" and friends: explicit read mode (upstream
+					// only defaulted to read when NO suffix was given,
+					// so OPEN name,S,R produced an unreadable channel)
+					channels[channel].read = true;
+					break;
 			}
+		} else {
+			channels[channel].read = true; // "name,S": type only, read
 		}
 	} else {
 		channels[channel].read = true;
