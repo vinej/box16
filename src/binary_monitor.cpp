@@ -10,8 +10,18 @@
 // instructions, so no locking is needed against the debugger core.
 //
 // MVP limits (documented in the x16_test README): memspace 0 (main memory)
-// only; checkpoint conditions are accepted but not evaluated; AUTOSTART is
+// only; checkpoint condition STRINGS (CHECKPOINT_CONDITION_SET) are
+// accepted but not evaluated (the boxmon expression engine proved
+// unreliable for this -- order-dependent parse state); AUTOSTART is
 // acknowledged but ignored.
+//
+// X16 extension, second part: CHECKPOINT_SET accepts an optional binary
+// word-in-ranges condition after the bank qualifier. The core evaluates
+// it at CPU speed (debugger_process_cpu): the checkpoint only fires while
+// the little-endian word at watch_address is inside one of the inclusive
+// ranges; a miss never pauses the machine and never touches the wire.
+// This is how BASIC line breakpoints run at full emulation speed: watch
+// txtptr ($EE) against the tokenized program's per-line spans.
 //
 // X16 extension: CHECKPOINT_SET accepts an optional trailing u16 machine
 // bank number after the standard memspace byte (ROM bank for $C000-$FFFF,
@@ -194,6 +204,9 @@ struct checkpoint_t {
 	uint8_t     op; // CHECKPOINT_OP_* bits
 	bool        temporary;
 	uint8_t     bank; // machine bank (X16 extension); 0 from standard VICE clients
+	// X16 extension: optional word-in-ranges condition (empty = unconditional)
+	uint16_t                                   cond_watch = 0;
+	std::vector<std::pair<uint16_t, uint16_t>> cond_ranges;
 	uint32_t    hit_count;
 	uint32_t    ignore_count;
 	std::string condition;
@@ -566,9 +579,28 @@ void apply_checkpoint_range(const checkpoint_t &cp, void (*fn)(uint16_t, uint8_t
 	}
 }
 
+// The debugger core normalizes sub-$A000 breakpoints to bank 0; condition
+// helpers must address the same slot.
+uint8_t effective_bank(uint16_t addr, uint8_t bank)
+{
+	return addr < 0xa000 ? 0 : bank;
+}
+
+void clear_checkpoint_condition(checkpoint_t &cp)
+{
+	if (cp.cond_ranges.empty()) {
+		return;
+	}
+	for (uint32_t addr = cp.start; addr <= cp.end; ++addr) {
+		debugger_clear_word_range_condition(static_cast<uint16_t>(addr), effective_bank(static_cast<uint16_t>(addr), cp.bank));
+	}
+	cp.cond_ranges.clear();
+}
+
 void remove_all_checkpoints()
 {
-	for (const auto &[num, cp] : Checkpoints) {
+	for (auto &[num, cp] : Checkpoints) {
+		clear_checkpoint_condition(cp);
 		apply_checkpoint_range(cp, debugger_remove_breakpoint);
 	}
 	Checkpoints.clear();
@@ -699,6 +731,24 @@ void cmd_checkpoint_set(body_reader &req, uint32_t request_id)
 		}
 		cp.bank = static_cast<uint8_t>(bank);
 	}
+	if (req.have(1)) { // X16 extension: optional word-in-ranges condition
+		const uint8_t cond_type = req.u8();
+		if (cond_type != 1 || !req.have(3)) {
+			send_empty_response(RESPONSE_CHECKPOINT_INFO, ERR_INVALID_PARAM, request_id);
+			return;
+		}
+		cp.cond_watch       = req.u16();
+		const uint8_t count = req.u8();
+		if (!req.have(static_cast<uint32_t>(count) * 4)) {
+			send_empty_response(RESPONSE_CHECKPOINT_INFO, ERR_INVALID_LENGTH, request_id);
+			return;
+		}
+		for (uint8_t i = 0; i < count; ++i) {
+			const uint16_t lo = req.u16();
+			const uint16_t hi = req.u16();
+			cp.cond_ranges.emplace_back(lo, hi);
+		}
+	}
 	if (cp.end < cp.start) {
 		send_empty_response(RESPONSE_CHECKPOINT_INFO, ERR_INVALID_PARAM, request_id);
 		return;
@@ -707,6 +757,10 @@ void cmd_checkpoint_set(body_reader &req, uint32_t request_id)
 	apply_checkpoint_range(cp, debugger_add_breakpoint);
 	if (!cp.enabled) {
 		apply_checkpoint_range(cp, debugger_deactivate_breakpoint);
+	}
+	for (uint32_t addr = cp.start; !cp.cond_ranges.empty() && addr <= cp.end; ++addr) {
+		debugger_set_word_range_condition(static_cast<uint16_t>(addr), effective_bank(static_cast<uint16_t>(addr), cp.bank),
+		                                  cp.cond_watch, cp.cond_ranges);
 	}
 	Checkpoints[cp.num] = cp;
 
@@ -727,6 +781,7 @@ void cmd_checkpoint_delete(body_reader &req, uint32_t request_id)
 		send_empty_response(CMD_CHECKPOINT_DELETE, ERR_OBJECT_MISSING, request_id);
 		return;
 	}
+	clear_checkpoint_condition(it->second);
 	apply_checkpoint_range(it->second, debugger_remove_breakpoint);
 	Checkpoints.erase(it);
 	send_empty_response(CMD_CHECKPOINT_DELETE, ERR_OK, request_id);
@@ -779,7 +834,9 @@ void cmd_checkpoint_condition_set(body_reader &req, uint32_t request_id)
 		send_empty_response(CMD_CHECKPOINT_CONDITION_SET, ERR_OBJECT_MISSING, request_id);
 		return;
 	}
-	// Stored but not evaluated (MVP): the checkpoint fires unconditionally.
+	// Stored but not evaluated: the boxmon expression engine is not reliable
+	// enough here (order-dependent parse state). Fast conditional checkpoints
+	// use the binary word-in-ranges extension of CHECKPOINT_SET instead.
 	it->second.condition.assign(reinterpret_cast<const char *>(req.data + req.pos), cond_len);
 	send_empty_response(CMD_CHECKPOINT_CONDITION_SET, ERR_OK, request_id);
 }

@@ -17,6 +17,12 @@ static uint8_t                                       *Breakpoint_flags = nullptr
 static std::map<uint32_t, std::string>                Breakpoint_conditions;
 static std::map<uint32_t, const boxmon::expression *> Breakpoint_expressions;
 
+struct word_range_condition {
+	uint16_t                                   watch_address;
+	std::vector<std::pair<uint16_t, uint16_t>> ranges;
+};
+static std::map<uint32_t, word_range_condition> Breakpoint_word_ranges;
+
 static boxmon::parser Condition_parser;
 static const std::string Empty_string("");
 
@@ -110,6 +116,7 @@ void debugger_init(int max_ram_banks)
 
 	Breakpoint_conditions.clear();
 	Breakpoint_expressions.clear();
+	Breakpoint_word_ranges.clear();
 
 	options_apply_debugger_opts();
 }
@@ -123,6 +130,7 @@ void debugger_shutdown()
 	}
 	Breakpoint_expressions.clear();
 	Breakpoint_conditions.clear();
+	Breakpoint_word_ranges.clear();
 }
 
 bool debugger_is_paused()
@@ -248,6 +256,23 @@ void debugger_process_cpu()
 			}
 		} else {
 			return;
+		}
+	}
+
+	if (!Breakpoint_word_ranges.empty()) {
+		if (auto iter = Breakpoint_word_ranges.find(get_offset(addr, bank)); iter != Breakpoint_word_ranges.end()) {
+			const uint16_t value = static_cast<uint16_t>(debug_read6502(iter->second.watch_address)) |
+			                       (static_cast<uint16_t>(debug_read6502(iter->second.watch_address + 1)) << 8);
+			bool in_range = false;
+			for (const auto &[lo, hi] : iter->second.ranges) {
+				if (value >= lo && value <= hi) {
+					in_range = true;
+					break;
+				}
+			}
+			if (!in_range) {
+				return; // condition miss: never pause, never notify
+			}
 		}
 	}
 
@@ -419,6 +444,28 @@ bool debugger_has_valid_expression(uint16_t address, uint8_t bank)
 	return (Breakpoint_flags[offset] & DEBUG6502_EXPRESSION);
 }
 
+void debugger_set_word_range_condition(uint16_t address, uint8_t bank, uint16_t watch_address,
+                                       const std::vector<std::pair<uint16_t, uint16_t>> &ranges)
+{
+	if (address < 0xa000) {
+		bank = 0;
+	}
+	const uint32_t offset = get_offset(address, bank);
+	if (ranges.empty()) {
+		Breakpoint_word_ranges.erase(offset);
+	} else {
+		Breakpoint_word_ranges[offset] = { watch_address, ranges };
+	}
+}
+
+void debugger_clear_word_range_condition(uint16_t address, uint8_t bank)
+{
+	if (address < 0xa000) {
+		bank = 0;
+	}
+	Breakpoint_word_ranges.erase(get_offset(address, bank));
+}
+
 void debugger_add_breakpoint(uint16_t address, uint8_t bank /* = 0 */, uint8_t flags /* = DEBUG6502_EXEC */)
 {
 	if (address < 0xa000) {
@@ -462,6 +509,7 @@ void debugger_remove_breakpoint(uint16_t address, uint8_t bank /* = 0 */, uint8_
 		if (auto eiter = Breakpoint_expressions.find(offset); eiter != Breakpoint_expressions.end()) {
 			Breakpoint_expressions.erase(eiter);
 		}
+		Breakpoint_word_ranges.erase(offset);
 	}
 }
 

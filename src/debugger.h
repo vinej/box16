@@ -9,6 +9,8 @@
 #	include <string>
 #	include <set>
 #	include <tuple>
+#	include <utility>
+#	include <vector>
 
 #	include "boxmon/parser.h"
 #	include "cpu/fake6502.h"
@@ -44,6 +46,15 @@ std::string debugger_get_condition(uint16_t address, uint8_t bank);
 void        debugger_set_condition(uint16_t address, uint8_t bank, const std::string &condition);
 bool        debugger_evaluate_condition(uint16_t address, uint8_t bank);
 bool        debugger_has_valid_expression(uint16_t address, uint8_t bank);
+
+// Word-in-ranges condition on an exec breakpoint: when set, the breakpoint
+// only fires while the little-endian word at watch_address falls inside one
+// of the (inclusive) ranges. Evaluated in debugger_process_cpu at CPU speed;
+// a miss never pauses the machine. Used by the binary monitor to implement
+// BASIC line breakpoints (watch txtptr against tokenized line spans).
+void debugger_set_word_range_condition(uint16_t address, uint8_t bank, uint16_t watch_address,
+                                       const std::vector<std::pair<uint16_t, uint16_t>> &ranges);
+void debugger_clear_word_range_condition(uint16_t address, uint8_t bank);
 
     // Bank parameter is only meaninful for addresses >= $A000.
 // Addresses < $A000 will force bank to 0.
