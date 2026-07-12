@@ -51,11 +51,48 @@ static constexpr socket_t INVALID_SOCK = -1;
 #include "hypercalls.h"
 #include "memory.h"
 
-// Uncomment to hexdump every frame in both directions, for diagnosing
-// client parser mismatches.
-// #define BINARY_MONITOR_TRACE
+// Set the environment variable BOX16_BINMON_LOG to a file path to record a
+// timestamped wire trace (every rx/tx frame plus run-state notes) for
+// diagnosing client interactions such as VS64's attach handshake.
 
 namespace {
+
+FILE *Log_file = nullptr;
+
+const char *command_name(uint8_t cmd);
+
+void log_open()
+{
+	const char *path = getenv("BOX16_BINMON_LOG");
+	if (path && *path) {
+		Log_file = fopen(path, "w");
+		if (Log_file) {
+			fmt::print(Log_file, "# box16 binary monitor wire trace\n");
+			fflush(Log_file);
+		}
+	}
+}
+
+void log_line(const std::string &s)
+{
+	if (Log_file) {
+		fmt::print(Log_file, "{}\n", s);
+		fflush(Log_file);
+	}
+}
+
+void log_frame(const char *dir, const uint8_t *data, size_t len, const char *note)
+{
+	if (!Log_file) {
+		return;
+	}
+	std::string hex;
+	for (size_t i = 0; i < len && i < 48; ++i) {
+		hex += fmt::format("{:02x} ", data[i]);
+	}
+	fmt::print(Log_file, "{} [{:3} B] {:22} {}{}\n", dir, len, note, hex, len > 48 ? "..." : "");
+	fflush(Log_file);
+}
 
 constexpr uint8_t PROTOCOL_STX  = 0x02;
 constexpr uint8_t PROTOCOL_API  = 0x02;
@@ -197,17 +234,6 @@ bool would_block()
 #endif
 }
 
-#ifdef BINARY_MONITOR_TRACE
-void trace_frame(const char *dir, const uint8_t *data, size_t len)
-{
-	fmt::print("binmon {} [{}]:", dir, len);
-	for (size_t i = 0; i < len && i < 64; ++i) {
-		fmt::print(" {:02x}", data[i]);
-	}
-	fmt::print(len > 64 ? " ...\n" : "\n");
-}
-#endif
-
 // Debugger front-ends and the emulator exchange only tiny frames, so a
 // short blocking retry loop on the nonblocking socket is enough.
 void send_all(const uint8_t *data, size_t len)
@@ -215,9 +241,13 @@ void send_all(const uint8_t *data, size_t len)
 	if (Client_socket == INVALID_SOCK) {
 		return;
 	}
-#ifdef BINARY_MONITOR_TRACE
-	trace_frame("tx", data, len);
-#endif
+	if (Log_file && len >= 7) {
+		const char *note = data[6] == RESPONSE_STOPPED ? "STOPPED"
+		                 : data[6] == RESPONSE_RESUMED ? "RESUMED"
+		                 : data[6] == RESPONSE_CHECKPOINT_INFO ? "CHECKPOINT_INFO"
+		                 : "response";
+		log_frame("tx", data, len, note);
+	}
 	size_t sent    = 0;
 	int    retries = 0;
 	while (sent < len) {
@@ -766,6 +796,33 @@ void cmd_reset(uint32_t request_id)
 	Was_paused = true;
 }
 
+const char *command_name(uint8_t cmd)
+{
+	switch (cmd) {
+		case CMD_MEMORY_GET: return "MEMORY_GET";
+		case CMD_MEMORY_SET: return "MEMORY_SET";
+		case CMD_CHECKPOINT_GET: return "CHECKPOINT_GET";
+		case CMD_CHECKPOINT_SET: return "CHECKPOINT_SET";
+		case CMD_CHECKPOINT_DELETE: return "CHECKPOINT_DELETE";
+		case CMD_CHECKPOINT_LIST: return "CHECKPOINT_LIST";
+		case CMD_CHECKPOINT_TOGGLE: return "CHECKPOINT_TOGGLE";
+		case CMD_CHECKPOINT_CONDITION_SET: return "CONDITION_SET";
+		case CMD_REGISTERS_GET: return "REGISTERS_GET";
+		case CMD_REGISTERS_SET: return "REGISTERS_SET";
+		case CMD_ADVANCE_INSTRUCTIONS: return "ADVANCE_INSTR";
+		case CMD_EXECUTE_UNTIL_RETURN: return "UNTIL_RETURN";
+		case CMD_PING: return "PING";
+		case CMD_BANKS_AVAILABLE: return "BANKS_AVAIL";
+		case CMD_REGISTERS_AVAILABLE: return "REGISTERS_AVAIL";
+		case CMD_VICE_INFO: return "VICE_INFO";
+		case CMD_EXIT: return "EXIT";
+		case CMD_QUIT: return "QUIT";
+		case CMD_RESET: return "RESET";
+		case CMD_AUTOSTART: return "AUTOSTART";
+		default: return "UNKNOWN";
+	}
+}
+
 void dispatch(uint8_t command, uint32_t request_id, const uint8_t *body, size_t body_len)
 {
 	body_reader req{ body, body_len };
@@ -886,13 +943,14 @@ void pump_client()
 		if (Recv_buffer.size() - offset < 11 + body_len) {
 			break; // incomplete frame; wait for more bytes
 		}
-#ifdef BINARY_MONITOR_TRACE
-		trace_frame("rx", frame, 11 + body_len);
-#endif
 		const uint32_t request_id = static_cast<uint32_t>(frame[6]) | (static_cast<uint32_t>(frame[7]) << 8) |
 		                            (static_cast<uint32_t>(frame[8]) << 16) | (static_cast<uint32_t>(frame[9]) << 24);
 		const uint8_t command = frame[10];
+		log_frame("rx", frame, 11 + body_len, command_name(command));
 		dispatch(command, request_id, frame + 11, body_len);
+		if (Log_file) {
+			log_line(fmt::format("     -> pc=${:04x} paused={}", current_pc(), debugger_is_paused() ? 1 : 0));
+		}
 		offset += 11 + body_len;
 		if (Client_socket == INVALID_SOCK) {
 			return; // dispatch closed the connection (e.g. send failure)
@@ -982,6 +1040,7 @@ bool binary_monitor_init(const std::string &address)
 
 	Initialized = true;
 	Was_paused  = debugger_is_paused();
+	log_open();
 	fmt::print("binary monitor: listening on {}:{}\n", host, port);
 	// Tooling (e.g. a VSCode preLaunchTask) watches stdout for the line
 	// above to know the monitor is ready; with stdout on a pipe stdio is
