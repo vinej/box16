@@ -29,6 +29,7 @@ SOFTWARE.
 #include <atomic>
 #include <thread>
 
+#include "debugger.h"
 #include "display.h"
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_opengl2.h"
@@ -222,7 +223,11 @@ void icon_set::draw(int id, int x, int y, int w, int h, SDL_Color color)
 
 void display_video()
 {
-	if (!vera_video_is_cheat_frame()) {
+	// While paused, frame_count is frozen: with a warp cheat mask active,
+	// is_cheat_frame() is then a constant, and it's almost always "skip" --
+	// the paused loop's force-redraw would never reach the texture and a
+	// debugger stop under -warp would show a black/stale screen forever.
+	if (!vera_video_is_cheat_frame() || debugger_is_paused()) {
 		const uint8_t *video_buffer = vera_video_get_framebuffer();
 		glBindTexture(GL_TEXTURE_2D, Video_framebuffer_texture_handle);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, video_buffer);
