@@ -12,6 +12,14 @@
 // MVP limits (documented in the x16_test README): memspace 0 (main memory)
 // only; checkpoint conditions are accepted but not evaluated; AUTOSTART is
 // acknowledged but ignored.
+//
+// X16 extension: CHECKPOINT_SET accepts an optional trailing u16 machine
+// bank number after the standard memspace byte (ROM bank for $C000-$FFFF,
+// RAM bank for $A000-$BFFF), so exec checkpoints inside banked ROM/RAM
+// fire only while that bank is selected -- required to hook the BASIC
+// interpreter (e.g. newstt at $CC21, BASIC ROM bank 4) without stray hits
+// from the KERNAL/DOS banks. Standard 8/9-byte VICE bodies keep the old
+// behavior (bank 0).
 
 #include "binary_monitor.h"
 
@@ -185,6 +193,7 @@ struct checkpoint_t {
 	bool        enabled;
 	uint8_t     op; // CHECKPOINT_OP_* bits
 	bool        temporary;
+	uint8_t     bank; // machine bank (X16 extension); 0 from standard VICE clients
 	uint32_t    hit_count;
 	uint32_t    ignore_count;
 	std::string condition;
@@ -553,7 +562,7 @@ void apply_checkpoint_range(const checkpoint_t &cp, void (*fn)(uint16_t, uint8_t
 		return;
 	}
 	for (uint32_t addr = cp.start; addr <= cp.end; ++addr) {
-		fn(static_cast<uint16_t>(addr), 0, flags);
+		fn(static_cast<uint16_t>(addr), cp.bank, flags);
 	}
 }
 
@@ -568,9 +577,15 @@ void remove_all_checkpoints()
 // The checkpoint whose exec range covers the paused PC, if any.
 checkpoint_t *find_hit_checkpoint(uint16_t pc)
 {
+	const uint8_t pc_bank = memory_get_current_bank(pc);
 	for (auto &[num, cp] : Checkpoints) {
 		if (cp.enabled && (cp.op & CHECKPOINT_OP_EXEC) && pc >= cp.start && pc <= cp.end) {
-			return &cp;
+			// below $A000 the debugger core normalizes every breakpoint to
+			// bank 0 (debugger_add_breakpoint); mirror that here
+			const uint8_t cp_bank = (pc < 0xa000) ? 0 : cp.bank;
+			if (cp_bank == pc_bank) {
+				return &cp;
+			}
 		}
 	}
 	return nullptr;
@@ -671,9 +686,18 @@ void cmd_checkpoint_set(body_reader &req, uint32_t request_id)
 	cp.temporary    = req.u8() != 0;
 	cp.hit_count    = 0;
 	cp.ignore_count = 0;
+	cp.bank         = 0;
 	if (req.have(1) && req.u8() != 0) {
 		send_empty_response(RESPONSE_CHECKPOINT_INFO, ERR_INVALID_MEMSPACE, request_id);
 		return;
+	}
+	if (req.have(2)) { // X16 extension: optional machine bank qualifier
+		const uint16_t bank = req.u16();
+		if (bank > 0xff) {
+			send_empty_response(RESPONSE_CHECKPOINT_INFO, ERR_INVALID_PARAM, request_id);
+			return;
+		}
+		cp.bank = static_cast<uint8_t>(bank);
 	}
 	if (cp.end < cp.start) {
 		send_empty_response(RESPONSE_CHECKPOINT_INFO, ERR_INVALID_PARAM, request_id);
