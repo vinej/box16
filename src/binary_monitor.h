@@ -7,6 +7,7 @@
 #ifndef BINARY_MONITOR_H
 #	define BINARY_MONITOR_H
 
+#	include <cstdint>
 #	include <string>
 
 // Parse an address of the form "ip4://127.0.0.1:6502" (the VICE
@@ -21,5 +22,10 @@ void binary_monitor_shutdown();
 // tells the monitor which branch of the loop it is being called from so it
 // can skip its own throttling while the machine is stopped.
 void binary_monitor_process(bool emulation_paused);
+
+// Block up to timeout_ms waiting for monitor traffic (falls back to a plain
+// sleep when not initialized). Lets the paused main loop wake instantly on
+// incoming debugger commands instead of sleeping a scheduler quantum.
+void binary_monitor_wait_readable(uint32_t timeout_ms);
 
 #endif

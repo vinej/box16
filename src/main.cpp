@@ -403,12 +403,28 @@ void emulator_loop()
 			if (!debugger_is_paused()) {
 				continue; // the monitor resumed or stepped; run the CPU
 			}
-			vera_video_force_redraw_screen();
-			display_process();
-			if (!sdl_events_update()) {
-				break;
+			// Between redraws, block on the monitor socket so debugger
+			// commands are serviced the moment they arrive -- a debug
+			// client bursts several requests per user action (re-arm,
+			// resume, memory reads), and paying a vsync'd display flip
+			// (~16 ms) per request made every step cost hundreds of ms.
+			// The screen is static while paused, so 30 fps is plenty; the
+			// timestamp is taken AFTER display_process, whose vsync block
+			// would otherwise make the redraw branch permanently due.
+			static uint32_t last_paused_display_us = 0;
+			if (timing_total_microseconds_realtime() - last_paused_display_us > 33000) {
+				vera_video_force_redraw_screen();
+				display_process();
+				if (!sdl_events_update()) {
+					break;
+				}
+				last_paused_display_us = timing_total_microseconds_realtime();
+				// timing_update() sleeps to pace 60 fps -- only pay that on
+				// an actual frame, never on the command-servicing fast path
+				timing_update();
+			} else {
+				binary_monitor_wait_readable(2); // wakes instantly on a debugger command
 			}
-			timing_update();
 			continue;
 		}
 

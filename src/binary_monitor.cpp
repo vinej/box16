@@ -41,6 +41,7 @@
 // exists in the 1.1 API, and ws2_32.lib exports all of it.
 #	include <winsock.h>
 #	pragma comment(lib, "ws2_32.lib")
+#	pragma comment(lib, "winmm.lib")
 using socket_t = SOCKET;
 static constexpr socket_t INVALID_SOCK = INVALID_SOCKET;
 #else
@@ -48,6 +49,7 @@ static constexpr socket_t INVALID_SOCK = INVALID_SOCKET;
 #	include <errno.h>
 #	include <fcntl.h>
 #	include <netinet/in.h>
+#	include <netinet/tcp.h>
 #	include <sys/socket.h>
 #	include <unistd.h>
 using socket_t = int;
@@ -1265,6 +1267,10 @@ bool binary_monitor_init(const std::string &address)
 		fmt::print("binary monitor: WSAStartup failed\n");
 		return false;
 	}
+	// 1 ms scheduler quantum: the paused-loop SDL_Delay(1) between monitor
+	// polls must really be ~1 ms (default Windows quantum is 15.6 ms, which
+	// made every debug round trip cost a full quantum).
+	timeBeginPeriod(1);
 #endif
 
 	Listen_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -1337,8 +1343,29 @@ void binary_monitor_shutdown()
 	Recv_buffer.clear();
 	Initialized = false;
 #ifdef _WIN32
+	timeEndPeriod(1);
 	WSACleanup();
 #endif
+}
+
+void binary_monitor_wait_readable(uint32_t timeout_ms)
+{
+	// Used by the paused main loop instead of a plain sleep: wakes the
+	// moment the client sends a command (a sleep costs a full scheduler
+	// quantum, ~15.6 ms on Windows -- per round trip -- since Windows 11
+	// ignores timeBeginPeriod for background windows).
+	const socket_t s = (Client_socket != INVALID_SOCK) ? Client_socket : Listen_socket;
+	if (!Initialized || s == INVALID_SOCK) {
+		SDL_Delay(timeout_ms);
+		return;
+	}
+	fd_set readfds;
+	FD_ZERO(&readfds);
+	FD_SET(s, &readfds);
+	timeval tv;
+	tv.tv_sec  = 0;
+	tv.tv_usec = static_cast<long>(timeout_ms) * 1000;
+	select(static_cast<int>(s) + 1, &readfds, nullptr, nullptr, &tv);
 }
 
 void binary_monitor_process(bool emulation_paused)
@@ -1363,6 +1390,10 @@ void binary_monitor_process(bool emulation_paused)
 		Client_socket = accept(Listen_socket, nullptr, nullptr);
 		if (Client_socket != INVALID_SOCK) {
 			set_nonblocking(Client_socket);
+			// Debug traffic is a request/response ping-pong of tiny frames;
+			// Nagle + delayed ACK adds ~15-100ms per exchange on loopback.
+			const int nodelay = 1;
+			setsockopt(Client_socket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char *>(&nodelay), sizeof(nodelay));
 			Recv_buffer.clear();
 			Was_paused = debugger_is_paused();
 			fmt::print("binary monitor: client connected\n");
