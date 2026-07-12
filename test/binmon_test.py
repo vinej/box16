@@ -33,6 +33,8 @@ CMD_REGISTERS_GET = 0x31
 CMD_REGISTERS_SET = 0x32
 CMD_ADVANCE = 0x71
 CMD_UNTIL_RETURN = 0x73
+CMD_RESET = 0xCC
+CMD_AUTOSTART = 0xDD
 CMD_PING = 0x81
 CMD_BANKS_AVAILABLE = 0x82
 CMD_REGISTERS_AVAILABLE = 0x83
@@ -251,6 +253,32 @@ def milestone3(c, bp_addr):
     check(not stopped_again, "M3 no further stops after delete")
 
 
+def milestone4(c, bp_addr, prg_path):
+    """Reproduce VS64's attach handshake: RESET then AUTOSTART then break.
+
+    This is the sequence VS64 sends on 'vice attach' -- the machine must
+    come back up running the program, not sitting at the BASIC prompt, so
+    the breakpoint has something to hit.
+    """
+    rtype, err, _, _ = c.recv_response(c.send(CMD_RESET, b"\x00"))
+    check(rtype == CMD_RESET and err == 0, "M4 reset accepted")
+
+    name = prg_path.encode()
+    body = bytes([1, 0, 0, len(name)]) + name  # run flag, index, len, filename
+    rtype, err, _, _ = c.recv_response(c.send(CMD_AUTOSTART, body))
+    check(err == 0, "M4 autostart accepted")
+
+    bp = struct.pack("<HHBBBBB", bp_addr, bp_addr, 1, 1, 4, 0, 0)
+    rtype, err, _, _ = c.recv_response(c.send(CMD_CHECKPOINT_SET, bp))
+    check(rtype == RESP_CHECKPOINT_INFO and err == 0, "M4 checkpoint set after reset")
+
+    # After reset the program reloads and runs; the breakpoint must fire,
+    # proving the machine did not just idle at the BASIC prompt.
+    err, ebody = c.wait_event(RESP_STOPPED, timeout=40)
+    (stop_pc,) = struct.unpack_from("<H", ebody, 0)
+    check(stop_pc == bp_addr, f"M4 program restarted and hit breakpoint at ${stop_pc:04x}")
+
+
 def find_label(lbl_path, name):
     with open(lbl_path, "r", encoding="ascii", errors="replace") as f:
         for line in f:
@@ -265,14 +293,17 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=6502)
     ap.add_argument("--lbl", help="VICE label file; enables the M3 checkpoint tests")
-    ap.add_argument("--label", default="move_sprite", help="label to break on for M3")
+    ap.add_argument("--label", default="move_sprite", help="label to break on for M3/M4")
+    ap.add_argument("--prg", default="build/bounce.prg", help="prg path for the M4 autostart test")
     args = ap.parse_args()
 
     c = Client(args.host, args.port)
     milestone1(c)
     milestone2(c)
     if args.lbl:
-        milestone3(c, find_label(args.lbl, args.label))
+        addr = find_label(args.lbl, args.label)
+        milestone3(c, addr)
+        milestone4(c, addr, args.prg)
     print("DONE all milestones passed")
 
 

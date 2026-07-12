@@ -48,6 +48,7 @@ static constexpr socket_t INVALID_SOCK = -1;
 #include "cpu/fake6502.h"
 #include "debugger.h"
 #include "glue.h"
+#include "hypercalls.h"
 #include "memory.h"
 
 // Uncomment to hexdump every frame in both directions, for diagnosing
@@ -742,10 +743,19 @@ void cmd_quit(uint32_t request_id)
 	SDL_PushEvent(&evt);
 }
 
+// Reset, then re-arm Box16's boot loader from the -prg the emulator was
+// launched with, so the program is injected and RUN again once the KERNAL
+// comes back up. VS64 sends RESET immediately followed by AUTOSTART on
+// every connect (attach included); handling the reload here means the
+// program is running to break into, instead of leaving the machine at the
+// bare BASIC prompt. Harmless when no -prg was given.
 void cmd_reset(uint32_t request_id)
 {
 	send_empty_response(CMD_RESET, ERR_OK, request_id);
 	machine_reset();
+	hypercalls_init();
+	debugger_continue_execution();
+	Was_paused = false;
 }
 
 void dispatch(uint8_t command, uint32_t request_id, const uint8_t *body, size_t body_len)
