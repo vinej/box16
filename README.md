@@ -1,7 +1,7 @@
 # Box16
 
 Note: this fork add the possibility to debug Oscar64 C file from VSCode step by step in c file with VS64
-- see README cdebug.md
+- see https://github.com/vinej/x16_CDebugger to installation and usage
 
 [![Build status](https://github.com/indigodarkwolf/box16/actions/workflows/build.yml/badge.svg)](https://github.com/indigodarkwolf/box16/actions/workflows/build.yml)<br/>
 [![Release](https://img.shields.io/github/v/release/indigodarkwolf/box16)](https://github.com/indigodarkwolf/box16/releases)
