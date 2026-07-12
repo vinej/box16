@@ -279,6 +279,35 @@ def milestone4(c, bp_addr, prg_path):
     check(stop_pc == bp_addr, f"M4 program restarted and hit breakpoint at ${stop_pc:04x}")
 
 
+def milestone5(c, main_addr, prg_path):
+    """Debug-from-first-line: VS64 installs breakpoints BEFORE it sends
+    RESET/AUTOSTART on attach. A breakpoint on the first line of main()
+    must survive the reboot and fire before that line ever executes."""
+    bp = struct.pack("<HHBBBBB", main_addr, main_addr, 1, 1, 4, 0, 0)
+    rtype, err, rbody, _ = c.recv_response(c.send(CMD_CHECKPOINT_SET, bp))
+    check(err == 0, "M5 breakpoint on first line of main installed pre-reset")
+    (cp_num,) = struct.unpack_from("<I", rbody, 0)
+
+    rtype, err, _, _ = c.recv_response(c.send(CMD_RESET, b"\x00"))
+    name = prg_path.encode()
+    rtype, err, _, _ = c.recv_response(c.send(CMD_AUTOSTART, bytes([1, 0, 0, len(name)]) + name))
+    check(err == 0, "M5 reset + autostart sent (VS64 attach order)")
+
+    err, ebody = c.wait_event(RESP_STOPPED, timeout=40)
+    (stop_pc,) = struct.unpack_from("<H", ebody, 0)
+    check(stop_pc == main_addr, f"M5 stopped on main's first line ${stop_pc:04x} after restart")
+
+    # sanity: nothing of main has run yet -- step once and confirm we move
+    rtype, err, _, _ = c.recv_response(c.send(CMD_ADVANCE, struct.pack("<BH", 0, 1)))
+    c.wait_event(RESP_RESUMED, timeout=5)
+    err, ebody = c.wait_event(RESP_STOPPED, timeout=5)
+    (pc2,) = struct.unpack_from("<H", ebody, 0)
+    check(pc2 != main_addr, f"M5 single-step off the first line to ${pc2:04x}")
+
+    c.recv_response(c.send(CMD_CHECKPOINT_DELETE, struct.pack("<I", cp_num)))
+    c.recv_response(c.send(CMD_EXIT))
+
+
 def find_label(lbl_path, name):
     with open(lbl_path, "r", encoding="ascii", errors="replace") as f:
         for line in f:
@@ -304,6 +333,7 @@ def main():
         addr = find_label(args.lbl, args.label)
         milestone3(c, addr)
         milestone4(c, addr, args.prg)
+        milestone5(c, find_label(args.lbl, "main"), args.prg)
     print("DONE all milestones passed")
 
 
