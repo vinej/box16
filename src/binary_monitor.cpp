@@ -37,8 +37,10 @@ static constexpr socket_t INVALID_SOCK = -1;
 #endif
 
 #include <cstring>
+#include <fstream>
 #include <iterator>
 #include <map>
+#include <string>
 #include <vector>
 
 #include <fmt/format.h>
@@ -198,6 +200,126 @@ std::map<uint32_t, checkpoint_t> Checkpoints;
 uint32_t Next_checkpoint_num = 1;
 
 bool Was_paused = false;
+
+// ------------------------------------------------------------------
+// Source line table (from Oscar64's .dbj), used for line-granular
+// stepping. Line_key_map[addr] identifies the source line at that
+// address; -1 means "no source line here" (ROM, library asm, etc.).
+// Two addresses share a key iff they are the same source file + line.
+// ------------------------------------------------------------------
+constexpr int32_t NO_LINE = -1;
+std::vector<int32_t> Line_key_map; // indexed by 16-bit address
+bool                 Line_map_loaded = false;
+
+// Line stepping runs the CPU one instruction at a time inside the emulator
+// (no client round-trips) until the source line changes, so one client
+// ADVANCE advances one C line -- and a whole __asm{} block, being a single
+// source line, is stepped over as one unit whether F10 or F11 is used.
+bool    Line_stepping         = false;
+bool    Line_step_over        = false;
+int32_t Line_step_start_key   = NO_LINE;
+uint32_t Line_step_guard      = 0;
+// A single C line should never be more than a few thousand instructions;
+// this only bounds pathological cases (e.g. a spin loop) so a step cannot
+// wedge the emulator.
+constexpr uint32_t LINE_STEP_MAX = 2000000;
+
+int32_t line_key(uint16_t addr)
+{
+	return Line_map_loaded ? Line_key_map[addr] : NO_LINE;
+}
+
+// Defined in the Events section below; needed by cmd_advance above it.
+void send_pc_event(uint8_t event_type);
+void send_registers_event();
+
+// ------------------------------------------------------------------
+// Source line table loading
+// ------------------------------------------------------------------
+
+// Pull the integer that follows a `"key":` token, e.g. "start": 2176.
+bool json_int(const std::string &line, const char *key, long &out)
+{
+	const size_t k = line.find(key);
+	if (k == std::string::npos) {
+		return false;
+	}
+	size_t p = k + strlen(key);
+	while (p < line.size() && (line[p] == ' ' || line[p] == ':')) {
+		++p;
+	}
+	if (p >= line.size() || (!isdigit((unsigned char)line[p]) && line[p] != '-')) {
+		return false;
+	}
+	out = strtol(line.c_str() + p, nullptr, 10);
+	return true;
+}
+
+std::string json_str(const std::string &line, const char *key)
+{
+	const size_t k = line.find(key);
+	if (k == std::string::npos) {
+		return "";
+	}
+	size_t p = line.find('"', k + strlen(key));
+	if (p == std::string::npos) {
+		return "";
+	}
+	++p;
+	const size_t e = line.find('"', p);
+	return e == std::string::npos ? "" : line.substr(p, e - p);
+}
+
+// Parse the .dbj sitting next to the -prg. Its per-instruction line entries
+// are one JSON object per text line beginning with `{"start":` and carrying
+// only start/end/source/line -- the function/symbol headers begin with
+// `{"name":`, so a prefix test tells them apart without a JSON parser.
+void load_line_map(const std::string &dbj_path)
+{
+	std::ifstream f(dbj_path);
+	if (!f) {
+		return;
+	}
+	Line_key_map.assign(0x10000, NO_LINE);
+	std::map<std::string, int32_t> source_ids;
+	int32_t                        next_source_id = 0;
+	size_t                         entries        = 0;
+
+	std::string raw;
+	while (std::getline(f, raw)) {
+		size_t s = raw.find_first_not_of(" \t");
+		if (s == std::string::npos || raw.compare(s, 9, "{\"start\":") != 0) {
+			continue;
+		}
+		long start, end, ln;
+		if (!json_int(raw, "\"start\"", start) || !json_int(raw, "\"end\"", end) || !json_int(raw, "\"line\"", ln)) {
+			continue;
+		}
+		if (start < 0 || end > 0x10000 || end < start) {
+			continue;
+		}
+		const std::string src = json_str(raw, "\"source\"");
+		auto              it  = source_ids.find(src);
+		int32_t           sid;
+		if (it == source_ids.end()) {
+			sid              = next_source_id++;
+			source_ids[src]  = sid;
+		} else {
+			sid = it->second;
+		}
+		const int32_t key = sid * 1000000 + static_cast<int32_t>(ln);
+		for (long a = start; a < end; ++a) {
+			Line_key_map[a] = key;
+		}
+		++entries;
+	}
+
+	if (entries > 0) {
+		Line_map_loaded = true;
+		fmt::print("binary monitor: loaded {} source line spans from {}\n", entries, dbj_path);
+		fflush(stdout);
+	}
+}
 
 // ------------------------------------------------------------------
 // Socket plumbing
@@ -698,6 +820,21 @@ void cmd_advance_instructions(body_reader &req, uint32_t request_id)
 	const bool     step_over = req.u8() != 0;
 	const uint16_t count     = req.u16();
 	send_empty_response(CMD_ADVANCE_INSTRUCTIONS, ERR_OK, request_id);
+
+	// With a source line table, advance a whole C line internally rather
+	// than a single instruction: one client step = one source line, and an
+	// __asm{} block (a single source line spanning many instructions) is
+	// stepped over as one unit for both F10 and F11. The per-instruction
+	// grind happens inside the emulator instead of as client round-trips.
+	if (Line_map_loaded && line_key(current_pc()) != NO_LINE) {
+		Line_stepping       = true;
+		Line_step_over      = step_over;
+		Line_step_start_key = line_key(current_pc());
+		Line_step_guard     = 0;
+		Was_paused          = false; // suppress the normal transition events
+		send_pc_event(RESPONSE_RESUMED);
+	}
+
 	if (step_over) {
 		debugger_step_over_execution();
 	} else {
@@ -877,9 +1014,51 @@ void send_registers_event()
 	send_response(CMD_REGISTERS_GET, ERR_OK, EVENT_REQUEST_ID, body);
 }
 
+void stop_event(uint16_t pc)
+{
+	if (checkpoint_t *cp = find_hit_checkpoint(pc)) {
+		++cp->hit_count;
+		body_writer info;
+		write_checkpoint_info_body(info, *cp, true);
+		send_response(RESPONSE_CHECKPOINT_INFO, ERR_OK, EVENT_REQUEST_ID, info);
+	}
+	send_registers_event();
+	send_pc_event(RESPONSE_STOPPED);
+}
+
 void process_pause_transitions()
 {
 	const bool paused = debugger_is_paused();
+
+	// Drive an in-progress line step: keep single-stepping until the source
+	// line changes, a breakpoint is hit, or the safety bound is reached.
+	if (Line_stepping) {
+		if (!paused) {
+			return; // the current sub-step is still executing
+		}
+		const uint16_t pc           = current_pc();
+		const int32_t  key          = line_key(pc);
+		const bool     line_changed = (key != NO_LINE && key != Line_step_start_key);
+		const bool     at_break     = find_hit_checkpoint(pc) != nullptr;
+		if (line_changed || at_break || ++Line_step_guard >= LINE_STEP_MAX) {
+			Line_stepping = false;
+			Was_paused    = true;
+			if (Client_socket != INVALID_SOCK) {
+				stop_event(pc);
+			}
+			return;
+		}
+		// Same source line (or an unmapped region like ROM/library asm):
+		// step again without telling the client.
+		if (Line_step_over) {
+			debugger_step_over_execution();
+		} else {
+			debugger_step_execution(0);
+		}
+		Was_paused = false;
+		return;
+	}
+
 	if (paused == Was_paused) {
 		return;
 	}
@@ -888,14 +1067,7 @@ void process_pause_transitions()
 		return;
 	}
 	if (paused) {
-		if (checkpoint_t *cp = find_hit_checkpoint(current_pc())) {
-			++cp->hit_count;
-			body_writer info;
-			write_checkpoint_info_body(info, *cp, true);
-			send_response(RESPONSE_CHECKPOINT_INFO, ERR_OK, EVENT_REQUEST_ID, info);
-		}
-		send_registers_event();
-		send_pc_event(RESPONSE_STOPPED);
+		stop_event(current_pc());
 	} else {
 		send_pc_event(RESPONSE_RESUMED);
 	}
@@ -909,6 +1081,7 @@ void on_client_disconnected()
 {
 	close_socket(Client_socket);
 	Recv_buffer.clear();
+	Line_stepping = false;
 	// A client that vanishes must not leave the emulator wedged on orphaned
 	// breakpoints with nothing attached to service them.
 	const bool had_checkpoints = !Checkpoints.empty();
@@ -1055,6 +1228,15 @@ bool binary_monitor_init(const std::string &address)
 	Initialized = true;
 	Was_paused  = debugger_is_paused();
 	log_open();
+
+	// Load Oscar64's source line table (bounce.prg -> bounce.dbj) for
+	// line-granular stepping. Absent file just disables that feature.
+	if (!Options.prg_path.empty()) {
+		std::filesystem::path dbj = Options.prg_path;
+		dbj.replace_extension(".dbj");
+		load_line_map(dbj.generic_string());
+	}
+
 	fmt::print("binary monitor: listening on {}:{}\n", host, port);
 	// Tooling (e.g. a VSCode preLaunchTask) watches stdout for the line
 	// above to know the monitor is ready; with stdout on a pipe stdio is
