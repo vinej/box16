@@ -1,6 +1,6 @@
 # Box16
 
-Note: this fork add the possibility to debug Oscar64 C file from VSCode step by step in c file with VS64
+Note: this fork add the possibility to debug Oscar64 or llvm_mos C file from VSCode step by step in c file with VS64
 - see https://github.com/vinej/x16_CDebugger to installation and usage
 
 [![Build status](https://github.com/indigodarkwolf/box16/actions/workflows/build.yml/badge.svg)](https://github.com/indigodarkwolf/box16/actions/workflows/build.yml)<br/>
