@@ -1071,11 +1071,19 @@ uint8_t vera_video_step(float mhz, float steps)
 void vera_video_force_redraw_screen()
 {
 	const uint8_t old_sprite_line_collisions = sprite_line_collisions;
+	// -warp sets a cheat mask and render_line() skips ALL drawing on a
+	// cheat frame; frame_count is frozen while the debugger is paused,
+	// so if it froze on a cheat frame this whole redraw would be a
+	// no-op and the paused screen would stay stale forever.  Render
+	// for real regardless of the mask.
+	const int old_cheat_mask = cheat_mask;
+	cheat_mask               = 0;
 
 	for (int y = 0; y < SCREEN_HEIGHT; ++y) {
 		render_line(y, y);
 	}
 
+	cheat_mask             = old_cheat_mask;
 	sprite_line_collisions = old_sprite_line_collisions;
 }
 
