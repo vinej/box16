@@ -253,49 +253,54 @@ def milestone3(c, bp_addr):
     check(not stopped_again, "M3 no further stops after delete")
 
 
-def milestone4(c, bp_addr, prg_path):
-    """Reproduce VS64's attach handshake: RESET then AUTOSTART then break.
-
-    This is the sequence VS64 sends on 'vice attach' -- the machine must
-    come back up running the program, not sitting at the BASIC prompt, so
-    the breakpoint has something to hit.
-    """
+def attach_handshake(c, prg_path):
+    """Reproduce VS64's 'vice attach' sequence: RESET, then AUTOSTART. The
+    reset must leave the machine PAUSED at the reset vector (not running),
+    so breakpoints installed afterwards are armed before any program code
+    executes -- VS64 resumes later with CMD_EXIT."""
     rtype, err, _, _ = c.recv_response(c.send(CMD_RESET, b"\x00"))
-    check(rtype == CMD_RESET and err == 0, "M4 reset accepted")
-
+    check(rtype == CMD_RESET and err == 0, "reset accepted")
     name = prg_path.encode()
-    body = bytes([1, 0, 0, len(name)]) + name  # run flag, index, len, filename
-    rtype, err, _, _ = c.recv_response(c.send(CMD_AUTOSTART, body))
-    check(err == 0, "M4 autostart accepted")
+    rtype, err, _, _ = c.recv_response(c.send(CMD_AUTOSTART, bytes([1, 0, 0, len(name)]) + name))
+    check(err == 0, "autostart accepted")
 
+
+def milestone4(c, bp_addr, prg_path):
+    """The full attach-and-break flow VS64 performs."""
+    attach_handshake(c, prg_path)
+
+    # Breakpoints are installed after the reset (VS64 does this at
+    # configurationDone), while the machine is held paused.
     bp = struct.pack("<HHBBBBB", bp_addr, bp_addr, 1, 1, 4, 0, 0)
     rtype, err, _, _ = c.recv_response(c.send(CMD_CHECKPOINT_SET, bp))
     check(rtype == RESP_CHECKPOINT_INFO and err == 0, "M4 checkpoint set after reset")
 
-    # After reset the program reloads and runs; the breakpoint must fire,
-    # proving the machine did not just idle at the BASIC prompt.
+    # Then VS64 resumes (start() -> CMD_EXIT); the program boots and runs.
+    rtype, err, _, _ = c.recv_response(c.send(CMD_EXIT))
+    check(err == 0, "M4 resume after breakpoint installed")
+
     err, ebody = c.wait_event(RESP_STOPPED, timeout=40)
     (stop_pc,) = struct.unpack_from("<H", ebody, 0)
     check(stop_pc == bp_addr, f"M4 program restarted and hit breakpoint at ${stop_pc:04x}")
 
 
 def milestone5(c, main_addr, prg_path):
-    """Debug-from-first-line: VS64 installs breakpoints BEFORE it sends
-    RESET/AUTOSTART on attach. A breakpoint on the first line of main()
-    must survive the reboot and fire before that line ever executes."""
+    """Debug-from-first-line: reset holds the machine paused, breakpoints
+    are installed while paused, then resume -- a breakpoint on the first
+    line of main() must fire before that line ever executes."""
+    attach_handshake(c, prg_path)
+
     bp = struct.pack("<HHBBBBB", main_addr, main_addr, 1, 1, 4, 0, 0)
     rtype, err, rbody, _ = c.recv_response(c.send(CMD_CHECKPOINT_SET, bp))
-    check(err == 0, "M5 breakpoint on first line of main installed pre-reset")
+    check(err == 0, "M5 breakpoint on first line of main installed while paused")
     (cp_num,) = struct.unpack_from("<I", rbody, 0)
 
-    rtype, err, _, _ = c.recv_response(c.send(CMD_RESET, b"\x00"))
-    name = prg_path.encode()
-    rtype, err, _, _ = c.recv_response(c.send(CMD_AUTOSTART, bytes([1, 0, 0, len(name)]) + name))
-    check(err == 0, "M5 reset + autostart sent (VS64 attach order)")
+    rtype, err, _, _ = c.recv_response(c.send(CMD_EXIT))
+    check(err == 0, "M5 resume (VS64 start())")
 
     err, ebody = c.wait_event(RESP_STOPPED, timeout=40)
     (stop_pc,) = struct.unpack_from("<H", ebody, 0)
-    check(stop_pc == main_addr, f"M5 stopped on main's first line ${stop_pc:04x} after restart")
+    check(stop_pc == main_addr, f"M5 stopped on main's first line ${stop_pc:04x} before it ran")
 
     # sanity: nothing of main has run yet -- step once and confirm we move
     rtype, err, _, _ = c.recv_response(c.send(CMD_ADVANCE, struct.pack("<BH", 0, 1)))

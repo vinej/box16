@@ -746,16 +746,24 @@ void cmd_quit(uint32_t request_id)
 // Reset, then re-arm Box16's boot loader from the -prg the emulator was
 // launched with, so the program is injected and RUN again once the KERNAL
 // comes back up. VS64 sends RESET immediately followed by AUTOSTART on
-// every connect (attach included); handling the reload here means the
-// program is running to break into, instead of leaving the machine at the
-// bare BASIC prompt. Harmless when no -prg was given.
+// every connect (attach included); reloading here means the program runs
+// to break into, instead of the machine sitting at the BASIC prompt.
+//
+// Crucially, the machine is left PAUSED at the reset vector, not running:
+// VS64 installs its breakpoints AFTER the reset (via configurationDone)
+// and only then resumes with CMD_EXIT. If we resumed here, the program
+// would boot and run past main() before a single breakpoint was armed --
+// so a breakpoint on the first line of main() would never be hit. Holding
+// the reset lets those breakpoints land first. The STOPPED event for this
+// internal pause is suppressed (Was_paused pre-synced) so the client sees
+// a clean run that stops only at its own breakpoints.
 void cmd_reset(uint32_t request_id)
 {
 	send_empty_response(CMD_RESET, ERR_OK, request_id);
 	machine_reset();
 	hypercalls_init();
-	debugger_continue_execution();
-	Was_paused = false;
+	debugger_pause_execution();
+	Was_paused = true;
 }
 
 void dispatch(uint8_t command, uint32_t request_id, const uint8_t *body, size_t body_len)
