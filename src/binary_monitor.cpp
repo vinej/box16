@@ -864,6 +864,19 @@ void send_pc_event(uint8_t event_type)
 	send_response(event_type, ERR_OK, EVENT_REQUEST_ID, body);
 }
 
+// VICE emits an unsolicited REGISTER_INFO whenever the machine stops, and
+// clients rely on it to refresh their cached CPU state. VS64's source-line
+// step logic reads that cached PC (not the STOPPED event's pc) to decide
+// when a step has reached a new line -- without this event the cache stays
+// stale, getAddressInfo() never resolves, and stepping single-steps
+// forever. So mirror VICE: send REGISTER_INFO before STOPPED.
+void send_registers_event()
+{
+	body_writer body;
+	write_registers_body(body);
+	send_response(CMD_REGISTERS_GET, ERR_OK, EVENT_REQUEST_ID, body);
+}
+
 void process_pause_transitions()
 {
 	const bool paused = debugger_is_paused();
@@ -881,6 +894,7 @@ void process_pause_transitions()
 			write_checkpoint_info_body(info, *cp, true);
 			send_response(RESPONSE_CHECKPOINT_INFO, ERR_OK, EVENT_REQUEST_ID, info);
 		}
+		send_registers_event();
 		send_pc_event(RESPONSE_STOPPED);
 	} else {
 		send_pc_event(RESPONSE_RESUMED);

@@ -42,6 +42,7 @@ CMD_VICE_INFO = 0x85
 CMD_EXIT = 0xAA
 
 RESP_CHECKPOINT_INFO = 0x11
+RESP_REGISTER_INFO = 0x31
 RESP_STOPPED = 0x62
 RESP_RESUMED = 0x63
 
@@ -295,19 +296,29 @@ def milestone5(c, main_addr, prg_path):
     check(err == 0, "M5 breakpoint on first line of main installed while paused")
     (cp_num,) = struct.unpack_from("<I", rbody, 0)
 
+    c.events.clear()  # drop any events queued by earlier milestones
     rtype, err, _, _ = c.recv_response(c.send(CMD_EXIT))
     check(err == 0, "M5 resume (VS64 start())")
 
-    err, ebody = c.wait_event(RESP_STOPPED, timeout=40)
+    # On stop, a REGISTER_INFO event must arrive so the client can refresh
+    # its cached PC (VS64's step logic depends on it); then STOPPED.
+    err, rbody = c.wait_event(RESP_REGISTER_INFO, timeout=40)
+    regs = parse_registers(rbody)
+    check(regs[3] == main_addr, f"M5 register_info event carries pc=${regs[3]:04x} on stop")
+    err, ebody = c.wait_event(RESP_STOPPED, timeout=5)
     (stop_pc,) = struct.unpack_from("<H", ebody, 0)
     check(stop_pc == main_addr, f"M5 stopped on main's first line ${stop_pc:04x} before it ran")
 
-    # sanity: nothing of main has run yet -- step once and confirm we move
+    # sanity: nothing of main has run yet -- step once and confirm we move,
+    # and that each step also delivers a fresh REGISTER_INFO.
     rtype, err, _, _ = c.recv_response(c.send(CMD_ADVANCE, struct.pack("<BH", 0, 1)))
     c.wait_event(RESP_RESUMED, timeout=5)
+    err, rbody = c.wait_event(RESP_REGISTER_INFO, timeout=5)
+    regs = parse_registers(rbody)
     err, ebody = c.wait_event(RESP_STOPPED, timeout=5)
     (pc2,) = struct.unpack_from("<H", ebody, 0)
     check(pc2 != main_addr, f"M5 single-step off the first line to ${pc2:04x}")
+    check(regs[3] == pc2, f"M5 register_info pc matches stepped pc ${pc2:04x}")
 
     c.recv_response(c.send(CMD_CHECKPOINT_DELETE, struct.pack("<I", cp_num)))
     c.recv_response(c.send(CMD_EXIT))
