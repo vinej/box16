@@ -975,6 +975,10 @@ bool binary_monitor_init(const std::string &address)
 	Initialized = true;
 	Was_paused  = debugger_is_paused();
 	fmt::print("binary monitor: listening on {}:{}\n", host, port);
+	// Tooling (e.g. a VSCode preLaunchTask) watches stdout for the line
+	// above to know the monitor is ready; with stdout on a pipe stdio is
+	// fully buffered and would sit on it indefinitely.
+	fflush(stdout);
 	return true;
 }
 
