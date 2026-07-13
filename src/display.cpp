@@ -313,11 +313,18 @@ bool display_init()
 	Initd_imgui = true;
 
 	aspect_ratio = Options.widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f);
+	// The Display imgui panel starts at window_scale x native (see
+	// overlay.cpp SetNextWindowSize), but the OS window ignored -scale:
+	// at -scale 2 the panel was 2x larger than the window and only its
+	// top-left corner was visible -- the bottom of the X16 screen
+	// (where fresh output scrolls in) could never be seen. Size the
+	// default OS window to fit the scaled display.
+	const int window_scale = (Options.window_scale > 0) ? Options.window_scale : 1;
 	if (Options.window_width <= 0) {
-		Options.window_width = SCREEN_WIDTH + 2;
+		Options.window_width = SCREEN_WIDTH * window_scale + 2;
 	}
 	if (Options.window_height <= 0) {
-		Options.window_height = SCREEN_HEIGHT + IMGUI_OVERLAY_MENU_BAR_HEIGHT * 2 + 1; // Account for menu
+		Options.window_height = SCREEN_HEIGHT * window_scale + IMGUI_OVERLAY_MENU_BAR_HEIGHT * 2 + 1; // Account for menu
 	}
 
 	// Initialize SDL_GL
