@@ -3701,7 +3701,17 @@ void overlay_draw()
 #endif
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
 		ImGui::SetNextWindowSizeConstraints(ImVec2(80, 60), ImVec2(FLT_MAX, FLT_MAX));
-		ImGui::SetNextWindowSize(get_integer_scale_window_size(Options.window_scale), ImGuiCond_Once);
+		// Fit the panel to the ACTUAL work area instead of the nominal
+		// window_scale size: the OS window's chrome heights (main menu
+		// bar, panel title bar) only match the compile-time constant
+		// approximately, and a panel a few pixels taller than the
+		// window clipped the BOTTOM text row of the X16 screen in half
+		// (display_video letterboxes the image into whatever fits).
+		{
+			const ImGuiViewport *vp = ImGui::GetMainViewport();
+			ImGui::SetNextWindowPos(vp->WorkPos, ImGuiCond_Once);
+			ImGui::SetNextWindowSize(vp->WorkSize, ImGuiCond_Once);
+		}
 		ImGui::SetNextWindowDockID(dock_id, ImGuiCond_FirstUseEver);
 		if (ImGui::Begin(window_text, &Show_display)) {
 			display_focused = ImGui::IsWindowFocused();
